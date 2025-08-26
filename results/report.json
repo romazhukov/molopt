@@ -1,0 +1,23 @@
+{
+  "engine": "crest",
+  "best_energy_Eh": 13.664177429491,
+  "n_conformers_unique": 2,
+  "xtb_used": true,
+  "inputs": {
+    "xyz": "ethanol.xyz",
+    "charge": 0,
+    "multiplicity": 1
+  },
+  "optimized": [
+    {
+      "index": 1,
+      "energy": 13.66512775349,
+      "workdir": "results/xtb_001"
+    },
+    {
+      "index": 2,
+      "energy": 13.664177429491,
+      "workdir": "results/xtb_002"
+    }
+  ]
+}
