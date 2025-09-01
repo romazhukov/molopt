@@ -1,0 +1,26 @@
+                    ____  _____ _____     ____  _  _
+      -------------|  _ \|  ___|_   _|---|  _ \| || |------------
+     |             | | | | |_    | | ___ | | | | || |_           |
+     |             | |_| |  _|   | ||___|| |_| |__   _|          |
+     |             |____/|_|     |_|     |____/   |_|            |
+     |             ===================================           |
+     |            E. Caldeweyher, S. Ehlert & S. Grimme          |
+     |          Mulliken Center for Theoretical Chemistry        |
+     |                    University of Bonn                     |
+      ----------------------------------------------------------- 
+
+Rational (Becke-Johnson) damping: r2scan-D4-ATM
+---------------------
+  s6         1.0000
+  s8         0.6019
+  s9         1.0000
+  a1         0.5156
+  a2         5.7734
+ alp        16.0000
+--------------------
+
+Dispersion energy:      -2.0433091332187E-03 Eh
+
+[Info] Dispersion energy written to .EDISP
+
+---

@@ -1,8 +1,10 @@
 {
   "engine": "crest",
-  "best_energy_Eh": 13.664177429491,
-  "n_conformers_unique": 2,
-  "xtb_used": true,
+  "crest_level": "gfn2",
+  "opt_level": "r2scan3c",
+  "solvent": null,
+  "best_energy_Eh": -78.97912466862444,
+  "n_conformers": 1,
   "inputs": {
     "xyz": "ethanol.xyz",
     "charge": 0,
@@ -11,13 +13,8 @@
   "optimized": [
     {
       "index": 1,
-      "energy": 13.66512775349,
-      "workdir": "results/xtb_001"
-    },
-    {
-      "index": 2,
-      "energy": 13.664177429491,
-      "workdir": "results/xtb_002"
+      "energy": -78.97912466862444,
+      "workdir": "results/pyscf_001"
     }
   ]
 }
