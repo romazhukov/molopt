@@ -1,0 +1,4 @@
+$constrain
+distance: 1, 5, 2.20
+distance: 1, 6, 2.20
+$end

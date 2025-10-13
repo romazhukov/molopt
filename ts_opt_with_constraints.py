@@ -1,184 +1,282 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-TS оптимизация с констрейнтами (PySCF + geomeTRIC).
-Поддержка:
-- базисных сетов через JSON (--gbs),
-- автоматическая подгрузка с Basis Set Exchange (--gbs-name),
-- конфиг файла с констрейнтами (--cinp),
-- поиск переходных состояний (--ts).
+TS optimization with constraints for PySCF + geomeTRIC
+
+- PySCF (DFT, r2scan по умолчанию)
+- geomeTRIC для оптимизации (включая TS через transition=True)
+- Базисы: def2-SVP по умолчанию или Basis Set Exchange (--gbs),
+  или готовый JSON (--gbs-json)
+- Констрейны читаем из файла (--cinp) с блоками $constrain ... $end
+- Поддержка частотного анализа (--freq) через PySCF hessian
 """
+
+from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
+import tempfile
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple, Sequence, Iterable, Any
+
+try:
+    import basis_set_exchange as bse
+    HAVE_BSE = True
+except Exception:
+    HAVE_BSE = False
 
 from pyscf import gto, dft
-import basis_set_exchange as bse
+from pyscf.geomopt.geometric_solver import optimize as geometric_optimize
+from pyscf import hessian
 
+# ===================== ЧТЕНИЕ XYZ =====================
 
-# ============ Утилиты =====================
-
-def read_xyz(path: str) -> Tuple[List[str], List[Tuple[float, float, float]]]:
-    atoms, coords = [], []
-    with open(path, "r") as f:
-        lines = f.readlines()[2:]  # пропускаем первые две строки
-    for line in lines:
+def read_xyz(xyz_path: str) -> Tuple[List[str], List[Tuple[float, float, float]]]:
+    atoms: List[str] = []
+    coords: List[Tuple[float, float, float]] = []
+    with open(xyz_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    for line in lines[2:]:
         parts = line.split()
-        atoms.append(parts[0])
-        coords.append((float(parts[1]), float(parts[2]), float(parts[3])))
+        if len(parts) >= 4:
+            atoms.append(parts[0])
+            coords.append((float(parts[1]), float(parts[2]), float(parts[3])))
     return atoms, coords
 
+# ===================== БАЗИСЫ =====================
 
-def load_pyscf_basis_from_json(json_path: str):
-    """Загрузить PySCF-базис напрямую из JSON-файла."""
-    with open(json_path, "r", encoding="utf-8") as f:
+def load_pyscf_basis_from_json(path: str) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
         basis_dict = json.load(f)
     return basis_dict
 
-
-def make_pyscf_basis_from_bse(name: str, atoms: List[str]):
-    """Скачать базис с BSE и преобразовать в формат PySCF."""
-    basis_dict = {}
-    for symb in set(atoms):
-        basis_str = bse.get_basis(name, elements=[symb], fmt="nwchem")
-        basis_dict[symb] = gto.basis.parse(basis_str)
+def make_pyscf_basis_from_bse(name: str, atoms: Sequence[str]) -> Dict[str, Any]:
+    if not HAVE_BSE:
+        raise RuntimeError("basis_set_exchange не установлен (pip install basis_set_exchange)")
+    basis_dict: Dict[str, Any] = {}
+    unique = sorted(set(atoms))
+    for symb in unique:
+        text = bse.get_basis(name, elements=[symb], fmt="nwchem")
+        basis_dict[symb] = gto.basis.parse(text)
     return basis_dict
 
+# ===================== КОНСТРЕЙНЫ =====================
 
-def parse_constraints(cinp_path: str):
-    """Простейший парсер input.inp с секциями $constrain ... $end."""
-    constraints = {"distance": [], "angle": [], "dihedral": [], "metadyn": []}
-    with open(cinp_path, "r") as f:
-        lines = f.readlines()
-    block = None
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.lower().startswith("$constrain"):
-            block = "constrain"
-            continue
-        if line.lower().startswith("$metadyn"):
-            block = "metadyn"
-            continue
-        if line.lower().startswith("$end"):
-            block = None
-            continue
-        if block == "constrain":
-            if line.startswith("distance:"):
-                _, rest = line.split(":")
-                i, j, d = rest.split(",")
-                constraints["distance"].append((int(i), int(j), float(d)))
-            elif line.startswith("angle:"):
-                _, rest = line.split(":")
-                i, j, k, ang = rest.split(",")
-                constraints["angle"].append((int(i), int(j), int(k), float(ang)))
-            elif line.startswith("dihedral:"):
-                _, rest = line.split(":")
-                i, j, k, l, dih = rest.split(",")
-                constraints["dihedral"].append((int(i), int(j), int(k), int(l), float(dih)))
-            elif "force constant" in line:
-                constraints["force_const"] = float(line.split("=")[1])
-        elif block == "metadyn":
-            if line.startswith("atoms:"):
-                _, rest = line.split(":")
-                groups = []
-                for g in rest.split(","):
-                    if "-" in g:
-                        a, b = g.split("-")
-                        groups.extend(list(range(int(a), int(b) + 1)))
-                    else:
-                        groups.append(int(g))
-                constraints["metadyn"].append(groups)
-    return constraints
+def parse_cinp_constraints(cinp_path: str) -> Dict[str, Any]:
+    data = {"distance": [], "angle": [], "dihedral": []}
+    if not cinp_path:
+        return data
+    text = Path(cinp_path).read_text(encoding="utf-8")
+    constr_blocks = re.findall(r'(?is)^\s*\$constrain\b(.*?)^\s*\$end\b', text, flags=re.M)
+    for block in constr_blocks:
+        for raw in block.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            m = re.match(r'^distance\s*:\s*(\d+)\s*,\s*(\d+)\s*,\s*([^\s,]+)$', line, flags=re.I)
+            if m:
+                data["distance"].append((int(m.group(1)), int(m.group(2)), float(m.group(3))))
+                continue
+            m = re.match(r'^angle\s*:\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([^\s,]+)$', line, flags=re.I)
+            if m:
+                data["angle"].append((int(m.group(1)), int(m.group(2)), int(m.group(3)), float(m.group(4))))
+                continue
+            m = re.match(r'^dihedral\s*:\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([^\s,]+)$', line, flags=re.I)
+            if m:
+                data["dihedral"].append((int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)), float(m.group(5))))
+                continue
+    return data
 
+def _in_range(*idxs: int, natoms: int) -> bool:
+    return all(1 <= i <= natoms for i in idxs)
 
-# ============ Основной расчёт =====================
+def validate_constraints(constraints: Dict[str, Any], natoms: int) -> Dict[str, Any]:
+    out = {"distance": [], "angle": [], "dihedral": []}
+    for (i, j, val) in constraints.get("distance", []):
+        if _in_range(i, j, natoms=natoms):
+            out["distance"].append((i, j, val))
+    for (i, j, k, val) in constraints.get("angle", []):
+        if _in_range(i, j, k, natoms=natoms):
+            out["angle"].append((i, j, k, val))
+    for (i, j, k, l, val) in constraints.get("dihedral", []):
+        if _in_range(i, j, k, l, natoms=natoms):
+            out["dihedral"].append((i, j, k, l, val))
+    return out
 
-def build_pyscf(atoms, coords, charge, multiplicity, basis, debug=False):
-    spin = multiplicity - 1
+def write_geometric_constraints_file(constraints: Dict[str, Any], path: str) -> None:
+    lines: List[str] = []
+    lines.append("$set")
+    for (i, j, val) in constraints.get("distance", []):
+        lines.append(f"distance {i} {j} {val}")
+    for (i, j, k, val) in constraints.get("angle", []):
+        lines.append(f"angle {i} {j} {k} {val}")
+    for (i, j, k, l, val) in constraints.get("dihedral", []):
+        lines.append(f"dihedral {i} {j} {k} {l} {val}")
+    lines.append("$end")
+    Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+# ===================== PYSCF =====================
+
+def build_pyscf(
+    atoms: Sequence[str],
+    coords: Sequence[Iterable[float]],
+    *,
+    charge: int = 0,
+    multiplicity: int = 1,
+    basis: Any = "def2-SVP",
+    debug: bool = False
+):
+    spin = int(multiplicity) - 1
+    atom_spec = [[a, (float(x), float(y), float(z))] for a, (x, y, z) in zip(atoms, coords)]
     mol = gto.M(
-        atom=[[a, xyz] for a, xyz in zip(atoms, coords)],
+        atom=atom_spec,
         unit="Angstrom",
         charge=charge,
         spin=spin,
         basis=basis,
         verbose=4 if debug else 0,
     )
-    if spin == 0:
-        mf = dft.RKS(mol)
-    else:
-        mf = dft.UKS(mol)
+    mf = dft.RKS(mol) if mol.spin == 0 else dft.UKS(mol)
     mf.xc = "r2scan"
-    mf.conv_tol = 1e-9
+
+    mf.grids.level = 5
+    mf.max_cycle = 200
+    mf.level_shift = 0.5
+    mf.damp = 0.2
+    mf.diis_space = 12
+    mf.conv_tol = 1e-6
     return mol, mf
 
+# ===================== ЗАПУСК =====================
 
-def optimize_with_constraints(mf, ts=False, constraints=None):
-    """Запуск оптимизации через geomeTRIC с констрейнтами."""
-    from pyscf.geomopt.geometric_solver import optimize as geometric_optimize
-    import geometric
-
-    # Конфиг geomeTRIC
-    geom_options = {}
-    if ts:
-        geom_options["transition"] = True
-    if constraints:
-        geom_options["constraints"] = constraints
-
-    mol_opt = geometric_optimize(mf, **geom_options)
-    mf_opt = mf.__class__(mol_opt)
-    _ = mf_opt.kernel()
-    return mol_opt, mf_opt
-
-
-def run_job(xyz, gbs_json=None, gbs_name=None, cinp=None, ts=False, debug=False):
+def run_job(
+    xyz: str,
+    *,
+    gbs_name: str | None,
+    gbs_json: str | None,
+    cinp: str | None,
+    ts: bool,
+    charge: int,
+    multiplicity: int,
+    debug: bool,
+    freq: bool,
+    maxsteps: int,
+) -> None:
     atoms, coords = read_xyz(xyz)
 
-    # --- базис ---
-    if gbs_json is not None:
+    # Базис
+    if gbs_json:
         basis = load_pyscf_basis_from_json(gbs_json)
-    elif gbs_name is not None:   # <-- исправлено
+    elif gbs_name:
         basis = make_pyscf_basis_from_bse(gbs_name, atoms)
     else:
         basis = "def2-SVP"
 
-    # --- констрейны ---
-    constraints = parse_constraints(cinp) if cinp else None
+    # PySCF
+    mol, mf = build_pyscf(atoms, coords, charge=charge, multiplicity=multiplicity, basis=basis, debug=debug)
 
-    # --- PySCF ---
-    mol, mf = build_pyscf(atoms, coords, charge=0, multiplicity=1, basis=basis, debug=debug)
+    # Констрейны
+    constraints_raw = parse_cinp_constraints(cinp) if cinp else {"distance": [], "angle": [], "dihedral": []}
+    constraints = validate_constraints(constraints_raw, natoms=len(atoms))
 
-    # --- геом. оптимизация ---
-    mol_opt, mf_opt = optimize_with_constraints(mf, ts=ts, constraints=constraints)
+    tmp_dir = tempfile.TemporaryDirectory(prefix="geom_constraints_")
+    constraints_file = os.path.join(tmp_dir.name, "constraints.txt")
+    constraints_arg = None
+    if any(constraints[k] for k in ("distance", "angle", "dihedral")):
+        write_geometric_constraints_file(constraints, constraints_file)
+        constraints_arg = constraints_file
+        print(f"[INFO] constraints file written: {constraints_file}")
+    else:
+        print("[INFO] no valid constraints; продолжаем без ограничений")
 
-    print("Энергия SCF:", mf_opt.e_tot, "Eh")
-    return mol_opt, mf_opt
+    tmp_input = os.path.join(tmp_dir.name, "geom.inp")
+    Path(tmp_input).write_text("# dummy input for geomeTRIC\n", encoding="utf-8")
 
+    print(f"[INFO] запускаем geomeTRIC (transition={bool(ts)}, maxsteps={maxsteps})...")
 
-# ============ CLI =====================
+    # --- автоостановка при застревании ---
+    energies = []
+    def callback(env):
+        E = getattr(env, "e_tot", None)
+        if E is not None:
+            energies.append(E)
+            if len(energies) > 5:
+                dE = abs(energies[-1] - energies[-5])
+                if dE < 1e-6:
+                    print(f"[STOP] ΔE за 5 шагов < 1e-6 → останавливаю оптимизацию.")
+                    raise RuntimeError("Optimization stalled")
+
+    mol_opt = geometric_optimize(
+        mf,
+        constraints=constraints_arg,
+        transition=bool(ts),
+        maxsteps=maxsteps,
+        callback=callback,
+    )
+
+    # частотный анализ
+    if freq:
+        print("[INFO] считаем частоты...")
+        hess = hessian.Hessian(mf).kernel()
+        import numpy as np
+        from scipy.linalg import eigh
+        m = mol.atom_mass_list()
+        mw = np.repeat(m, 3)
+        w, v = eigh(hess, np.diag(mw))
+        freqs = (w * 219474.6) ** 0.5  # перевод в см^-1
+        imags = [f for f in freqs if f < 0]
+        if ts and len(imags) == 1:
+            print(f"[CHECK] TS подтверждён: одна мнимая частота ({imags[0]:.2f} cm^-1)")
+        elif ts and len(imags) != 1:
+            print(f"[WARN] TS неверный: {len(imags)} мнимых частот")
+        elif not ts and imags:
+            print(f"[WARN] минимум не подтверждён: {len(imags)} мнимых частот")
+
+    # сохранить xyz
+    try:
+        coords_fin = mol_opt.atom_coords(unit='Angstrom')
+        xyz_out = Path("optimized.xyz")
+        with xyz_out.open("w", encoding="utf-8") as f:
+            f.write(f"{len(atoms)}\noptimized by geomeTRIC (TS={bool(ts)})\n")
+            for a, (x, y, z) in zip([a[0] if isinstance(a, (list, tuple)) else a for a in mol_opt._atom], coords_fin):
+                f.write(f"{a:<2} {x:16.10f} {y:16.10f} {z:16.10f}\n")
+        print(f"[RESULT] Финальная геометрия сохранена: {xyz_out.resolve()}")
+    except Exception as e:
+        print(f"[WARN] не удалось сохранить optimized.xyz: {e}")
+
+    tmp_dir.cleanup()
+
+# ===================== CLI =====================
 
 def main():
-    parser = argparse.ArgumentParser(description="TS оптимизация с констрейнтами (PySCF+geomeTRIC)")
-    parser.add_argument("xyz", help="входной XYZ файл")
-    parser.add_argument("--gbs", help="JSON файл с базисом")
-    parser.add_argument("--gbs-name", dest="gbs_name", help="имя базиса из Basis Set Exchange (например def2-mTZVPP)")
-    parser.add_argument("--cinp", help="input.inp файл с констрейнтами")
-    parser.add_argument("--ts", action="store_true", help="поиск переходного состояния")
-    parser.add_argument("--debug", action="store_true", help="подробный вывод")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description="TS optimization with constraints (PySCF + geomeTRIC)")
+    ap.add_argument("xyz", help="Входной XYZ файл")
+    ap.add_argument("--gbs", dest="gbs_name", help="Имя базиса из Basis Set Exchange (например, def2-TZVP)")
+    ap.add_argument("--gbs-json", dest="gbs_json", help="Локальный JSON с PySCF-базисом")
+    ap.add_argument("--cinp", help="Файл с $constrain блоками (input.inp)")
+    ap.add_argument("--ts", action="store_true", help="Режим поиска переходного состояния")
+    ap.add_argument("--charge", type=int, default=0, help="Заряд системы")
+    ap.add_argument("--mult", type=int, default=1, help="Мультиплетность (2S+1)")
+    ap.add_argument("--maxsteps", type=int, default=200, help="Максимум шагов геом. оптимизации")
+    ap.add_argument("--freq", action="store_true", help="Считать частоты")
+    ap.add_argument("--debug", action="store_true", help="Отладочный вывод")
+    args = ap.parse_args()
 
     run_job(
         args.xyz,
-        gbs_json=args.gbs,
         gbs_name=args.gbs_name,
+        gbs_json=args.gbs_json,
         cinp=args.cinp,
         ts=args.ts,
+        charge=args.charge,
+        multiplicity=args.mult,
         debug=args.debug,
+        freq=args.freq,
+        maxsteps=args.maxsteps,
     )
-
 
 if __name__ == "__main__":
     main()

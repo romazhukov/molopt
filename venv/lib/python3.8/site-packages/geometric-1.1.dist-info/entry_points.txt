@@ -1,0 +1,4 @@
+[console_scripts]
+geometric-neb = geometric.neb:main
+geometric-optimize = geometric.optimize:main
+run-ase = geometric.ase_engine:main

@@ -1,0 +1,20 @@
+{
+  "engine": "rdkit",
+  "opt_level": "r2scan3c",
+  "solvent": null,
+  "threads": 2,
+  "best_energy_Eh": -75.79552956964773,
+  "n_conformers": 1,
+  "inputs": {
+    "xyz": "h2o.xyz",
+    "charge": 0,
+    "multiplicity": 1
+  },
+  "optimized": [
+    {
+      "index": 1,
+      "energy": -75.79552956964773,
+      "workdir": "results_geometric/pyscf_001"
+    }
+  ]
+}
