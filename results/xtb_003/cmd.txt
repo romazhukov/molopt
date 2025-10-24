@@ -1,2 +1,0 @@
-xtb conf.xyz --opt tight --chrg 0 --uhf 0 --gfn2
-abs: /home/romanzhukov/molopt/results/xtb_003/conf.xyz

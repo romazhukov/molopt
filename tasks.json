@@ -1,5 +1,0 @@
-[
-  {"file": "molecules/ethanol.xyz", "engine": "crest", "opt_level": "xtb", "charge": 0, "multiplicity": 1},
-  {"file": "molecules/butane.xyz", "engine": "rdkit", "opt_level": "r2scan3c", "charge": 0, "multiplicity": 1},
-  {"file": "molecules/h2o.xyz", "engine": "crest", "opt_level": "xtb", "charge": -1, "multiplicity": 2}
-]

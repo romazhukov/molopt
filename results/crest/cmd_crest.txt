@@ -1,1 +1,0 @@
-crest results/crest/input.xyz --gfn2 --chrg 0 --uhf 0 --ewin 6.0
